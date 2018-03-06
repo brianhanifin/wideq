@@ -8,6 +8,8 @@ import hmac
 import datetime
 from collections import namedtuple
 import enum
+import binascii
+import sys
 
 
 GATEWAY_URL = 'https://kic.lgthinq.com:46030/api/common/gatewayUriList'
@@ -95,9 +97,11 @@ def lgedm_post(url, data=None, access_token=None, session_id=None):
         if code != '0000':
             message = out['returnMsg']
             if code == "0106":
+                # TODO: this will need to be handled better
                 print('Unable to reach Device.  Device is off?')
-                pass
-            if code == "0102":
+                sys.exit("The device is off")
+                
+            elif code == "0102":
                 raise NotLoggedInError()
             else:
                 raise APIError(code, message)
@@ -295,10 +299,14 @@ class Session(object):
         res = self.post('rti/rtiResult', {'workList': work_list})['workList']
 
         # Weirdly, the main response data is base64-encoded JSON.
+        # Looks like we're getting a base64 encoded bytearray for the washer/dryer?
+        # This will need to be mapped from the info json.  I checked and it seems to add up with a list 
+        # of bytes decoded from b64.
+
         if 'returnData' in res:
-            return json.loads(
-                base64.b64decode(res['returnData']).decode('utf8')
-            )
+            print(res['returnData'])
+            print(list(binascii.a2b_base64(res['returnData'])))
+            
         else:
             return None
 
