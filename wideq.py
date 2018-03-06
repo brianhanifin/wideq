@@ -14,8 +14,8 @@ GATEWAY_URL = 'https://kic.lgthinq.com:46030/api/common/gatewayUriList'
 APP_KEY = 'wideq'
 SECURITY_KEY = 'nuts_securitykey'
 DATA_ROOT = 'lgedmRoot'
-COUNTRY = 'US'
-LANGUAGE = 'en-US'
+COUNTRY = 'CA'
+LANGUAGE = 'en-CA'
 SVC_CODE = 'SVC202'
 CLIENT_ID = 'LGAO221A02'
 OAUTH_SECRET_KEY = 'c053c2a6ddeb7ad97cb0eed0dcb31cf8'
@@ -84,7 +84,8 @@ def lgedm_post(url, data=None, access_token=None, session_id=None):
         headers['x-thinq-token'] = access_token
     if session_id:
         headers['x-thinq-jsessionId'] = session_id
-
+    print(url)
+    print(data)
     res = requests.post(url, json={DATA_ROOT: data}, headers=headers)
     out = res.json()[DATA_ROOT]
 
@@ -93,6 +94,9 @@ def lgedm_post(url, data=None, access_token=None, session_id=None):
         code = out['returnCd']
         if code != '0000':
             message = out['returnMsg']
+            if code == "0106":
+                print('Unable to reach Device.  Device is off?')
+                pass
             if code == "0102":
                 raise NotLoggedInError()
             else:
@@ -123,7 +127,7 @@ def oauth_url(auth_base):
         'svcCode': SVC_CODE,
         'authSvr': 'oauth2',
         'client_id': CLIENT_ID,
-        'division': 'ha',
+        'division': 'cic:iflime',
         'grant_type': 'password',
     })
     return '{}?{}'.format(url, query)
