@@ -86,8 +86,8 @@ def lgedm_post(url, data=None, access_token=None, session_id=None):
         headers['x-thinq-token'] = access_token
     if session_id:
         headers['x-thinq-jsessionId'] = session_id
-    print(url)
-    print(data)
+    # print(url)
+    # print(data)
     res = requests.post(url, json={DATA_ROOT: data}, headers=headers)
     out = res.json()[DATA_ROOT]
 
@@ -298,14 +298,18 @@ class Session(object):
         work_list = [{'deviceId': device_id, 'workId': work_id}]
         res = self.post('rti/rtiResult', {'workList': work_list})['workList']
 
-        # Weirdly, the main response data is base64-encoded JSON.
-        # Looks like we're getting a base64 encoded bytearray for the washer/dryer?
-        # This will need to be mapped from the info json.  I checked and it seems to add up with a list 
-        # of bytes decoded from b64.
-
         if 'returnData' in res:
-            print(res['returnData'])
-            print(list(binascii.a2b_base64(res['returnData'])))
+            try:
+                # Weirdly, the main response data is base64-encoded JSON. (AC Unit)
+                resData = json.loads(
+                    base64.b64decode(res['returnData']).decode('utf8')
+                    )
+            except:
+                # Looks like we're getting a base64 encoded bytearray for the washer/dryer?
+                resData = list(
+                    binascii.a2b_base64(res['returnData'])
+                    )
+            return resData
             
         else:
             return None
@@ -575,7 +579,99 @@ class ModelInfo(object):
         options = self.value(key).options
         return options[value]
 
+class ApplianceDevice(object):
+    """Higher level operations for an appliance (Washer/Dryer/???)"""
+    def __init__(self, client, device):
+        self.client = client
+        self.device = device
+        self.model = client.model_info(device)     
 
+    def get_values_list(self):
+        """Returns a list of all possible values"""
+        vals = self.model.data['Value']
+        valKeys = list(vals.keys())
+        
+        return valKeys
+    
+    def get_value_options(self, name):
+        """Get the possible options for a value, only Enum and Range implemented"""
+        vals = self.model.data['Value']
+        if name in vals:
+            if vals[name]['type'] == 'Enum':
+                return EnumValue(
+                    vals[name]['option']
+                )
+            elif vals[name]['type'] == 'Range':
+                return RangeValue(
+                    vals[name]['option']['min'], vals[name]['option']['max'], '1'
+                )
+            else:
+                return 1
+        else:
+            return 0
+        
+    def get_monitoring_list(self):
+        """Returns a list of all monitored values we get from the polling"""
+        monitoring = self.model.data['Monitoring']['protocol']
+        monList = []
+        
+        for mon in monitoring:
+            monList.append(mon['value'])
+            
+        return monList
+        
+
+    def monitor_start(self):
+        """Start monitoring the device's status."""
+
+        self.mon = Monitor(self.client.session, self.device.id)
+        self.mon.start()
+
+    def monitor_stop(self):
+        """Stop monitoring the device's status."""
+
+        self.mon.stop()
+    
+    def poll(self):
+        res = self.mon.poll()
+        if res:
+            return ApplianceStatus(self, res).mon_status()
+        else:
+            return None
+        
+class ApplianceStatus(object):
+    """Class to map Values to monitoring data for applicances"""
+    def __init__(self, appliance, data):
+        self.appliance = appliance
+        self.data = data
+        
+    def mon_status(self):
+        """Returns a dictionary of current monitored values"""
+        monStatus = {}
+        values = self.appliance.get_values_list()
+        monitoring = self.appliance.get_monitoring_list()
+        
+        for key, item in enumerate(self.data):
+            if key < len(monitoring):
+                if monitoring[key] in values:
+                    valOptions = self.appliance.get_value_options(monitoring[key])
+                    
+                    if isinstance(valOptions, int):
+                        continue
+                    if isinstance(valOptions, EnumValue):
+                        monStatus[monitoring[key]] = valOptions.options.get(str(item))
+                    if isinstance(valOptions, RangeValue):
+                        monStatus[monitoring[key]] = item
+                    
+                else:
+                    continue
+            else:
+                monStatus['Item ' + str(key)] = item
+            
+        return monStatus
+        
+        
+####  Below is for AC Unit
 class ACMode(enum.Enum):
     """The operation mode for an AC/HVAC device."""
 
