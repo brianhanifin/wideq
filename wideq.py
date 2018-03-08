@@ -94,14 +94,14 @@ def lgedm_post(url, data=None, access_token=None, session_id=None):
     # Check for API errors.
     if 'returnCd' in out:
         code = out['returnCd']
-        if code != '0000':
+        if code != '0000' and code !='0106':
             message = out['returnMsg']
-            if code == "0106":
-                # TODO: this will need to be handled better
-                print('Unable to reach Device.  Device is off?')
-                sys.exit("The device is off")
+            # if code == "0106":
+                # # TODO: this will need to be handled better
+                # print('Unable to reach Device.  Device is off?')
+                # sys.exit("The device is off")
                 
-            elif code == "0102":
+            if code == "0102":
                 raise NotLoggedInError()
             else:
                 raise APIError(code, message)
@@ -277,7 +277,7 @@ class Session(object):
         """Begin monitoring a device's status.
 
         Return a "work ID" that can be used to retrieve the result of
-        monitoring.
+        monitoring.  Or a 0 if device is reachable.
         """
 
         res = self.post('rti/rtiMon', {
@@ -286,7 +286,12 @@ class Session(object):
             'deviceId': device_id,
             'workId': gen_uuid(),
         })
-        return res['workId']
+        
+        if 'workId' in res:
+            return res['workId']
+        else:
+            return 0
+        
 
     def monitor_poll(self, device_id, work_id):
         """Get the result of a monitoring task.
@@ -294,7 +299,9 @@ class Session(object):
         `work_ids` is a mapping from device IDs to work IDs. Return the
         device status or None if the monitoring is not yet ready.
         """
-
+        if work_id == 0:
+            return None 
+            
         work_list = [{'deviceId': device_id, 'workId': work_id}]
         res = self.post('rti/rtiResult', {'workList': work_list})['workList']
 
