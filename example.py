@@ -125,12 +125,16 @@ def appliance_mon(client, device_id):
     appliance = wideq.ApplianceDevice(client, client.get_device(device_id))
     
     try:
-        appliance.monitor_start()
-        while True:
-            time.sleep(2)
-            state = appliance.poll()
-            if state:
-                print(state)
+        device_available = appliance.monitor_start()
+        if device_available:
+            while True:
+                time.sleep(2)
+                state = appliance.poll()
+
+                if state:
+                    print(state)
+        else:
+            print('Device unreachable, is it powered on?')
 
     except KeyboardInterrupt:
         pass

@@ -300,7 +300,7 @@ class Session(object):
         device status or None if the monitoring is not yet ready.
         """
         if work_id == 0:
-            return None 
+            return 0 
             
         work_list = [{'deviceId': device_id, 'workId': work_id}]
         res = self.post('rti/rtiResult', {'workList': work_list})['workList']
@@ -356,6 +356,7 @@ class Monitor(object):
 
     def start(self):
         self.work_id = self.session.monitor_start(self.device_id)
+        return self.work_id
 
     def stop(self):
         self.session.monitor_stop(self.device_id, self.work_id)
@@ -622,8 +623,8 @@ class ApplianceDevice(object):
         monitoring = self.model.data['Monitoring']['protocol']
         monList = []
         
-        for mon in monitoring:
-            monList.append(mon['value'])
+        for item in monitoring:
+            monList.append(item['value'])
             
         return monList
         
@@ -632,7 +633,7 @@ class ApplianceDevice(object):
         """Start monitoring the device's status."""
 
         self.mon = Monitor(self.client.session, self.device.id)
-        self.mon.start()
+        return self.mon.start()
 
     def monitor_stop(self):
         """Stop monitoring the device's status."""
@@ -641,8 +642,9 @@ class ApplianceDevice(object):
     
     def poll(self):
         res = self.mon.poll()
+        
         if res:
-            return ApplianceStatus(self, res).mon_status()
+            return ApplianceStatus(self, res)
         else:
             return None
         
@@ -651,10 +653,8 @@ class ApplianceStatus(object):
     def __init__(self, appliance, data):
         self.appliance = appliance
         self.data = data
-        
-    def mon_status(self):
-        """Returns a dictionary of current monitored values"""
-        monStatus = {}
+
+        polled_data = {}
         values = self.appliance.get_values_list()
         monitoring = self.appliance.get_monitoring_list()
         
@@ -664,18 +664,70 @@ class ApplianceStatus(object):
                     valOptions = self.appliance.get_value_options(monitoring[key])
                     
                     if isinstance(valOptions, int):
+                        """Not dealing with Bit or Reference data yet"""
                         continue
                     if isinstance(valOptions, EnumValue):
-                        monStatus[monitoring[key]] = valOptions.options.get(str(item))
+                        polled_data[monitoring[key]] = valOptions.options.get(str(item))
                     if isinstance(valOptions, RangeValue):
-                        monStatus[monitoring[key]] = item
+                        polled_data[monitoring[key]] = item
                     
                 else:
+                    """Only dealing with Value for now, Energy monitoring will come later"""
                     continue
             else:
-                monStatus['Item ' + str(key)] = item
+                polled_data['Item ' + str(key)] = item
             
-        return monStatus
+    def get_polled_data(self):
+        """ Returns all data in a dictionary """
+        
+        return polled_data
+    
+    def convert_to_time(self, hours, minutes):
+        """ We receive intergers for hours and integers for minutes,
+            this method will convert to a time string.
+        """
+        
+        timer = str(hours) + ":" + str(minutes)
+        return
+    
+    @property
+    def time_remaining(self):
+        """ Returns time remaining for this cycle """
+        
+        hours = polled_data['Remain_Time_H']
+        minutes = polled_data['Remain_Time_M']
+        
+        return self.convert_to_time(hours, minutes)
+    
+    @property
+    def initial_time(self):
+        """ Returns the initially approximated time for the full cycle """
+    
+        hours = polled_data['Initial_Time_H']
+        minutes = polled_data['Initial_Time_M']
+        
+        return self.convert_to_time(hours, minutes)
+    
+    @property
+    def reserve_time(self):
+        """ Returns the Reserve time (I believe this is when the 
+            appliance is set to start at a later time) 
+        """
+        
+        hours = polled_data['Reserve_Time_H']
+        minutes = polled_data['Reserve_Time_M']
+        
+        return self.convert_to_time(hours, minutes)    
+    
+    @property    
+    def current_cycle(self):
+        """ Returns the current cycle/status """
+    
+        return None
+    
+    @property
+    def is_on(self):
+        return None
         
         
 ####  Below is for AC Unit
