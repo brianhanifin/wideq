@@ -132,7 +132,9 @@ def appliance_mon(client, device_id):
                 state = appliance.poll()
 
                 if state:
-                    print(state)
+                    print(state.get_polled_data())
+                    print(state.is_on)
+                    print(state.state)
         else:
             print('Device unreachable, is it powered on?')
 

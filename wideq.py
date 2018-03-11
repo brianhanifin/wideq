@@ -10,6 +10,8 @@ from collections import namedtuple
 import enum
 import binascii
 import sys
+import os
+from bitstring import BitArray
 
 
 GATEWAY_URL = 'https://kic.lgthinq.com:46030/api/common/gatewayUriList'
@@ -300,7 +302,7 @@ class Session(object):
         device status or None if the monitoring is not yet ready.
         """
         if work_id == 0:
-            return 0 
+            return None 
             
         work_list = [{'deviceId': device_id, 'workId': work_id}]
         res = self.post('rti/rtiResult', {'workList': work_list})['workList']
@@ -529,7 +531,31 @@ class DeviceInfo(object):
     @property
     def model_info_url(self):
         return self.data['modelJsonUrl']
+        
+    @property
+    def model_image_url(self):
+        return self.data['imageUrl']
+    
+    @property
+    def model_small_icon_url(self):
+        return self.data['smallImageUrl']
 
+    def get_icon(self, path):
+        """ Returns a path to a small file downloaded from LG's service representing the device """
+        
+        url = self.model_small_icon_url
+        filename = os.path.join(path, url.split("=")[-1])
+        r = requests.get(url, timeout=0.5)
+
+        if r.status_code == 200:
+            with open(filename, 'wb') as f:
+                f.write(r.content)
+        
+        if f:
+            return filename
+        else:
+            return None
+    
     @property
     def name(self):
         return self.data['alias']
@@ -587,6 +613,26 @@ class ModelInfo(object):
         options = self.value(key).options
         return options[value]
 
+class AP_STATUS(enum.Enum):
+
+    OFF = "@WM_STATE_POWER_OFF_W"
+    STANDBY = "@WM_STATE_INITIAL_W"
+    PAUSE = "@WM_STATE_PAUSE_W"
+    DETECTING = "@WM_STATE_DETECTING_W"
+    SOAK = "@WM_STATE_SOAK_W"
+    RUNNING = "@WM_STATE_RUNNING_W"
+    RINSING = "@WM_STATE_RINSING_W"
+    SPINNING = "@WM_STATE_SPINNING_W"
+    FINISHED = "@WM_STATE_COMPLETE_W"
+    RESERVE = "@WM_STATE_RESERVE_W"
+    FIRMWARE = "@WM_STATE_FIRMWARE_W"
+    DIAGNOSIS = "@WM_STATE_SMART_DIAGNOSIS_W"
+    END = "@WM_STATE_END_W"
+    ERROR = "@WM_STATE_ERROR_W"
+    DRYING = "@WM_STATE_DRYING_W"
+    COOLING = "@WM_STATE_COOLING_W"
+    WRINKLECARE = "@WM_STATE_WRINKLECARE_W"
+                
 class ApplianceDevice(object):
     """Higher level operations for an appliance (Washer/Dryer/???)"""
     def __init__(self, client, device):
@@ -654,48 +700,56 @@ class ApplianceStatus(object):
         self.appliance = appliance
         self.data = data
 
-        polled_data = {}
-        values = self.appliance.get_values_list()
-        monitoring = self.appliance.get_monitoring_list()
+        self.polled_data = {}
+        self.values = self.appliance.get_values_list()
+        self.monitoring = self.appliance.get_monitoring_list()
         
         for key, item in enumerate(self.data):
-            if key < len(monitoring):
-                if monitoring[key] in values:
-                    valOptions = self.appliance.get_value_options(monitoring[key])
+            if key < len(self.monitoring):
+                if self.monitoring[key] in self.values:
+                    valOptions = self.appliance.get_value_options(self.monitoring[key])
                     
                     if isinstance(valOptions, int):
                         """Not dealing with Bit or Reference data yet"""
                         continue
                     if isinstance(valOptions, EnumValue):
-                        polled_data[monitoring[key]] = valOptions.options.get(str(item))
+                        self.polled_data[self.monitoring[key]] = valOptions.options.get(str(item))
                     if isinstance(valOptions, RangeValue):
-                        polled_data[monitoring[key]] = item
+                        self.polled_data[self.monitoring[key]] = item
                     
                 else:
                     """Only dealing with Value for now, Energy monitoring will come later"""
                     continue
             else:
-                polled_data['Item ' + str(key)] = item
+                self.polled_data['Item ' + str(key)] = item
             
     def get_polled_data(self):
         """ Returns all data in a dictionary """
         
-        return polled_data
+        return self.polled_data
     
     def convert_to_time(self, hours, minutes):
-        """ We receive intergers for hours and integers for minutes,
+        """ We receive integers for hours and integers for minutes,
             this method will convert to a time string.
         """
+        if minutes < 10:
+            minutes_str = '0' + str(minutes)
+        else: 
+            minutes_str = str(minutes)
+            
+        timer = str(hours) + ":" + minutes_str
+        return timer
         
-        timer = str(hours) + ":" + str(minutes)
-        return
+    def lookup_enum(self, key):
+        return self.appliance.model.enum_name(key, self.data[key])
     
     @property
     def time_remaining(self):
         """ Returns time remaining for this cycle """
         
-        hours = polled_data['Remain_Time_H']
-        minutes = polled_data['Remain_Time_M']
+        hours = self.polled_data['Remain_Time_H']
+        minutes = self.polled_data['Remain_Time_M']
+        
         
         return self.convert_to_time(hours, minutes)
     
@@ -703,8 +757,9 @@ class ApplianceStatus(object):
     def initial_time(self):
         """ Returns the initially approximated time for the full cycle """
     
-        hours = polled_data['Initial_Time_H']
-        minutes = polled_data['Initial_Time_M']
+        hours = self.polled_data['Initial_Time_H']
+        minutes = self.polled_data['Initial_Time_M']
+        
         
         return self.convert_to_time(hours, minutes)
     
@@ -714,20 +769,20 @@ class ApplianceStatus(object):
             appliance is set to start at a later time) 
         """
         
-        hours = polled_data['Reserve_Time_H']
-        minutes = polled_data['Reserve_Time_M']
+        hours = self.polled_data['Reserve_Time_H']
+        minutes = self.polled_data['Reserve_Time_M']
         
         return self.convert_to_time(hours, minutes)    
     
     @property    
-    def current_cycle(self):
+    def status(self):
         """ Returns the current cycle/status """
     
-        return None
+        return AP_STATUS(self.polled_data['State'])
     
     @property
     def is_on(self):
-        return None
+        return self.state != AP_STATUS.OFF
         
         
 ####  Below is for AC Unit
