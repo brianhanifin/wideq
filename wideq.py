@@ -659,6 +659,14 @@ class ApplianceDevice(object):
                 return RangeValue(
                     vals[name]['option']['min'], vals[name]['option']['max'], '1'
                 )
+            elif vals[name]['type'] == 'Bit':
+                bit_values = {}
+                for item in vals[name]['option']:
+                    bit_values[item['startbit']] = {
+                        'value' : item['value'],
+                        'length' : item['length'],
+                    }
+                return bit_values
             else:
                 return 1
         else:
@@ -666,13 +674,28 @@ class ApplianceDevice(object):
         
     def get_monitoring_list(self):
         """Returns a list of all monitored values we get from the polling"""
-        monitoring = self.model.data['Monitoring']['protocol']
-        monList = []
         
-        for item in monitoring:
-            monList.append(item['value'])
+        protocol = self.model.data['Monitoring']['protocol']
+        mon_list = []
+        
+        for item in protocol:
+            mon_list.append(item['value'])
             
-        return monList
+        return mon_list
+        
+    def get_protocol(self):
+        """ Returns a dict of the monitoring protocol, Keys are the start byte of the polling """
+        
+        raw_protocol = self.model.data['Monitoring']['protocol']
+        protocol = {}
+        
+        for item in raw_protocol:
+            protocol[item['startByte']] = {
+                'value' : item['value'], 
+                'length' : item['length'],
+                }
+        
+        return protocol
         
 
     def monitor_start(self):
@@ -702,26 +725,45 @@ class ApplianceStatus(object):
 
         self.polled_data = {}
         self.values = self.appliance.get_values_list()
-        self.monitoring = self.appliance.get_monitoring_list()
+        self.protocol = self.appliance.get_protocol()
         
         for key, item in enumerate(self.data):
-            if key < len(self.monitoring):
-                if self.monitoring[key] in self.values:
-                    valOptions = self.appliance.get_value_options(self.monitoring[key])
-                    
-                    if isinstance(valOptions, int):
-                        """Not dealing with Bit or Reference data yet"""
-                        continue
-                    if isinstance(valOptions, EnumValue):
-                        self.polled_data[self.monitoring[key]] = valOptions.options.get(str(item))
-                    if isinstance(valOptions, RangeValue):
-                        self.polled_data[self.monitoring[key]] = item
-                    
-                else:
-                    """Only dealing with Value for now, Energy monitoring will come later"""
-                    continue
+
+            if key in self.protocol:
+                val_options = self.appliance.get_value_options(self.protocol[key]['value'])
+                
+                if isinstance(val_options, int):
+                    """Not dealing with Reference data"""
+                    self.polled_data[self.protocol[key]['value']] = item
+                if isinstance(val_options, EnumValue):
+                    self.polled_data[self.protocol[key]['value']] = val_options.options.get(str(item))
+                if isinstance(val_options, RangeValue):
+                    self.polled_data[self.protocol[key]['value']] = item
+                if isinstance(val_options, dict):
+                    bit_array = BitArray(uint=item, length=8)
+                    bit_array.reverse()
+                    for k, v in enumerate(bit_array.bin):
+                        if k in val_options:
+                            if val_options[k]['value'] == 'InitialBit':
+                                """ InitialBit is the only Bool value, let's map it manually """
+                            
+                                if v == 0:
+                                    self.polled_data[val_options[k]['value']] = False
+                                else:
+                                    self.polled_data[val_options[k]['value']] = True
+                            else:
+                                val_sub_options = self.appliance.get_value_options(val_options[k]['value'])
+                                if isinstance(val_sub_options, int):
+                                    """ Excluding Reference """
+                                    
+                                    self.polled_data[val_options[k]['value']] = v
+                                else:
+                                    self.polled_data[val_options[k]['value']] = val_sub_options.options.get(str(v))
+                
             else:
+                """Only dealing with Value for now, Energy monitoring will come later"""
                 self.polled_data['Item ' + str(key)] = item
+
             
     def get_polled_data(self):
         """ Returns all data in a dictionary """
@@ -782,7 +824,7 @@ class ApplianceStatus(object):
     
     @property
     def is_on(self):
-        return self.state != AP_STATUS.OFF
+        return self.status != AP_STATUS.OFF
         
         
 ####  Below is for AC Unit
