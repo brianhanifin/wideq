@@ -668,7 +668,7 @@ class ApplianceDevice(object):
                     }
                 return bit_values
             else:
-                return 1
+                return None
         else:
             return 0
         
@@ -736,10 +736,13 @@ class ApplianceStatus(object):
                     """Not dealing with Reference data"""
                     self.polled_data[self.protocol[key]['value']] = item
                 if isinstance(val_options, EnumValue):
+                    """ Enums are mapped directly """
                     self.polled_data[self.protocol[key]['value']] = val_options.options.get(str(item))
                 if isinstance(val_options, RangeValue):
+                    """ Range are usually time """
                     self.polled_data[self.protocol[key]['value']] = item
                 if isinstance(val_options, dict):
+                    """ Options, these a mapped bits """
                     bit_array = BitArray(uint=item, length=8)
                     bit_array.reverse()
                     for k, v in enumerate(bit_array.bin):
