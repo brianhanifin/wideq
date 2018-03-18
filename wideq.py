@@ -568,7 +568,8 @@ class DeviceInfo(object):
 
 EnumValue = namedtuple('EnumValue', ['options'])
 RangeValue = namedtuple('RangeValue', ['min', 'max', 'step'])
-
+BitValue = namedtuple('BitValue', ['options'])
+ReferenceValue = namedtuple('ReferenceValue', ['reference'])
 
 class ModelInfo(object):
     """A description of a device model's capabilities.
@@ -576,6 +577,12 @@ class ModelInfo(object):
 
     def __init__(self, data):
         self.data = data
+    
+    def value_type(self, name):
+        if name in self.data['Value']:
+            return self.data['Value'][name]['type']
+        else:
+            return None
 
     def value(self, name):
         """Look up information about a value.
@@ -586,9 +593,31 @@ class ModelInfo(object):
         if d['type'] in ('Enum', 'enum'):
             return EnumValue(d['option'])
         elif d['type'] == 'Range':
-            return RangeValue(
-                d['option']['min'], d['option']['max'], d['option']['step']
+            if d['option']['step']:
+                return RangeValue(
+                    d['option']['min'], d['option']['max'], d['option']['step']
+                )
+            else:
+                return RangeValue(
+                    d['option']['min'], d['option']['max'], '1'
+                )
+        elif d['type'] == 'Bit':
+            bit_values = {}
+            for bit in d['option']:
+                bit_values[bit['startbit']] = {
+                    'value' : bit['value'],
+                    'length' : bit['length'],
+                }
+            return BitValue(
+                    bit_values
             )
+        elif d['type'] == 'Reference':
+            ref =  d['option'][0]
+            return ReferenceValue(
+                self.data[ref]
+            )
+        elif d['type'] == 'Boolean':
+            return EnumValue({'0': 'False', '1' : 'True'})
         else:
             assert False, "unsupported value type {}".format(d['type'])
 
@@ -609,9 +638,48 @@ class ModelInfo(object):
     def enum_name(self, key, value):
         """Look up the friendly enum name for an encoded value.
         """
-
+        if not self.value_type(key):
+            return str(value)
+        
         options = self.value(key).options
-        return options[value]
+        return options[str(value)]
+        
+    def range_name(self, key):
+        """Look up the value of a RangeValue.  Not very useful other than for comprehension  
+        """
+        
+        return key
+        
+    def bit_name(self, key, bit_index, value):
+        """Look up the friendly name for an encoded bit value
+        """
+        if not self.value_type(key):
+            return str(value)
+            
+        options = self.value(key).options
+        
+        if not self.value_type(options[bit_index]['value']):
+            return str(value) 
+            
+        enum_options = self.value(options[bit_index]['value']).options
+        return enum_options[value]
+        
+    def reference_name(self, key, value):
+        """Look up the friendly name for an encoded reference value
+        """
+        
+        if not self.value_type(key):
+            return str(value)
+            
+        reference = self.value(key).reference
+        if value in reference:
+            comment = reference[str(value)]['_comment']
+            return comment if comment else reference[value]['label']
+        else:
+            return '-'
+        
+        
+        
 
 class AP_STATUS(enum.Enum):
 
@@ -670,9 +738,9 @@ class ApplianceDevice(object):
             else:
                 return None
         else:
-            return 0
+            return 1
         
-    def get_monitoring_list(self):
+    def monitoring_list(self):
         """Returns a list of all monitored values we get from the polling"""
         
         protocol = self.model.data['Monitoring']['protocol']
@@ -683,7 +751,7 @@ class ApplianceDevice(object):
             
         return mon_list
         
-    def get_protocol(self):
+    def protocol(self):
         """ Returns a dict of the monitoring protocol, Keys are the start byte of the polling """
         
         raw_protocol = self.model.data['Monitoring']['protocol']
@@ -724,54 +792,40 @@ class ApplianceStatus(object):
         self.data = data
 
         self.polled_data = {}
-        self.values = self.appliance.get_values_list()
-        self.protocol = self.appliance.get_protocol()
+        self.protocol = self.appliance.protocol()
         
         for key, item in enumerate(self.data):
 
             if key in self.protocol:
-                val_options = self.appliance.get_value_options(self.protocol[key]['value'])
+                polled_item = self.protocol[key]['value']
+                value_type = self.appliance.model.value_type(polled_item)
                 
-                if isinstance(val_options, int):
-                    """Not dealing with Reference data"""
-                    self.polled_data[self.protocol[key]['value']] = item
-                if isinstance(val_options, EnumValue):
-                    """ Enums are mapped directly """
-                    self.polled_data[self.protocol[key]['value']] = val_options.options.get(str(item))
-                if isinstance(val_options, RangeValue):
-                    """ Range are usually time """
-                    self.polled_data[self.protocol[key]['value']] = item
-                if isinstance(val_options, dict):
-                    """ Options, these a mapped bits """
+                if value_type == 'Enum':
+                    self.polled_data[polled_item] = self.appliance.model.enum_name(polled_item, item)
+                elif value_type == 'Range':
+                    self.polled_data[polled_item] = self.appliance.model.range_name(item)
+                elif value_type == 'Bit':
                     bit_array = BitArray(uint=item, length=8)
                     bit_array.reverse()
+                    bit_options = self.appliance.get_value_options(polled_item)
+                    self.polled_data[polled_item] = {}
                     for k, v in enumerate(bit_array.bin):
-                        if k in val_options:
-                            if val_options[k]['value'] == 'InitialBit':
-                                """ InitialBit is the only Bool value, let's map it manually """
-                            
-                                if v == 0:
-                                    self.polled_data[val_options[k]['value']] = False
-                                else:
-                                    self.polled_data[val_options[k]['value']] = True
-                            else:
-                                val_sub_options = self.appliance.get_value_options(val_options[k]['value'])
-                                if isinstance(val_sub_options, int):
-                                    """ Excluding Reference """
-                                    
-                                    self.polled_data[val_options[k]['value']] = v
-                                else:
-                                    self.polled_data[val_options[k]['value']] = val_sub_options.options.get(str(v))
-                
+                        if k in bit_options:
+                            self.polled_data[polled_item][bit_options[k]['value']] = self.appliance.model.bit_name(polled_item, k, v)
+                elif value_type == 'Reference':
+                    self.polled_data[polled_item] = self.appliance.model.reference_name(polled_item, item)
+                else:
+                    self.polled_data[polled_item] = "Undecoded value - " + str(item)
             else:
-                """Only dealing with Value for now, Energy monitoring will come later"""
-                self.polled_data['Item ' + str(key)] = item
+                self.polled_data['Item ' + str(key)] = "Value not in protocol - " + str(item)
 
             
     def get_polled_data(self):
         """ Returns all data in a dictionary """
         
         return self.polled_data
+        
+        
     
     def convert_to_time(self, hours, minutes):
         """ We receive integers for hours and integers for minutes,
