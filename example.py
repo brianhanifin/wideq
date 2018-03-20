@@ -142,6 +142,33 @@ def appliance_mon(client, device_id):
         pass
     finally:
         appliance.monitor_stop()
+        
+def stop_appliance(client, device_id):
+    appliance = wideq.ApplianceDevice(client, client.get_device(device_id))
+    
+    device_available = appliance.monitor_start()
+    if device_available:
+        time.sleep(5)
+        appliance.stop()
+    appliance.monitor_stop()
+    
+def start_appliance(client, device_id):
+    appliance = wideq.ApplianceDevice(client, client.get_device(device_id))
+    
+    device_available = appliance.monitor_start()
+    if device_available:
+        time.sleep(5)
+        appliance.start()
+    appliance.monitor_stop()
+
+def turn_off_appliance(client, device_id):
+    appliance = wideq.ApplianceDevice(client, client.get_device(device_id))
+    
+    device_available = appliance.monitor_start()
+    if device_available:
+        time.sleep(5)
+        appliance.turn_off()
+    appliance.monitor_stop()
 
 def set_temp(client, device_id, temp):
     """Set the configured temperature for an AC device."""
@@ -184,6 +211,9 @@ EXAMPLE_COMMANDS = {
     'dev': getDeviceInfo,
     'model': getModelInfo,
     'app-mon': appliance_mon,
+    'stop-app': stop_appliance,
+    'start-app': start_appliance,
+    'off-app': turn_off_appliance,
 }
 
 

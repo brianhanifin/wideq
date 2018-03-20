@@ -333,7 +333,7 @@ class Session(object):
             'workId': work_id,
         })
 
-    def set_device_controls(self, device_id, values):
+    def set_device_controls(self, device_id, values, cmdOpt = 'Set', data = ''):
         """Control a device's settings.
 
         `values` is a key/value map containing the settings to update.
@@ -341,11 +341,11 @@ class Session(object):
 
         self.post('rti/rtiControl', {
             'cmd': 'Control',
-            'cmdOpt': 'Set',
+            'cmdOpt': cmdOpt,
             'value': values,
             'deviceId': device_id,
             'workId': gen_uuid(),
-            'data': '',
+            'data': data,
         })
 
 
@@ -537,10 +537,11 @@ class DeviceInfo(object):
         return self.data['imageUrl']
     
     @property
-    def model_small_icon_url(self):
+    def model_small_image_url(self):
         return self.data['smallImageUrl']
-
-    def get_icon(self, path):
+    
+    @property
+    def image(self, path):
         """ Returns a path to a small file downloaded from LG's service representing the device """
         
         url = self.model_small_icon_url
@@ -667,13 +668,14 @@ class ModelInfo(object):
     def reference_name(self, key, value):
         """Look up the friendly name for an encoded reference value
         """
-        
+        value = str(value)
         if not self.value_type(key):
-            return str(value)
+            return value
             
         reference = self.value(key).reference
+
         if value in reference:
-            comment = reference[str(value)]['_comment']
+            comment = reference[value]['_comment']
             return comment if comment else reference[value]['label']
         else:
             return '-'
@@ -700,13 +702,19 @@ class AP_STATUS(enum.Enum):
     DRYING = "@WM_STATE_DRYING_W"
     COOLING = "@WM_STATE_COOLING_W"
     WRINKLECARE = "@WM_STATE_WRINKLECARE_W"
+    
+class AP_STRINGS(enum.Enum):
+    
+    OFF = '@CP_OFF_EN_W'
+    ON = '@CP_ON_EN_W'
                 
 class ApplianceDevice(object):
     """Higher level operations for an appliance (Washer/Dryer/???)"""
     def __init__(self, client, device):
         self.client = client
         self.device = device
-        self.model = client.model_info(device)     
+        self.model = client.model_info(device)
+        self.status = None
 
     def get_values_list(self):
         """Returns a list of all possible values"""
@@ -781,9 +789,45 @@ class ApplianceDevice(object):
         res = self.mon.poll()
         
         if res:
-            return ApplianceStatus(self, res)
+            self.status = ApplianceStatus(self, res)
+            return self.status
         else:
             return None
+            
+    def stop(self):
+        """Stop current operation (to pause cycle)"""
+        self.poll()
+        
+        if self.status.is_on:
+            self.client.session.set_device_controls(
+                self.device.id,
+                'Stop',
+                'Operation',
+            )
+            
+    def start(self):
+        """ restart paused appliance """
+        self.poll()
+        
+        if self.status.is_on:
+            self.client.session.set_device_controls(
+                self.device.id,
+                'Start',
+                'Operation',
+            )
+
+            
+            
+    def turn_off(self):
+        """Turn off the appliance, will be unreachable after this."""
+        self.poll()        
+        
+        if self.status.is_on:
+            self.client.session.set_device_controls(
+                self.device.id,
+                'Off',
+                'Power',
+            )           
         
 class ApplianceStatus(object):
     """Class to map Values to monitoring data for applicances"""
@@ -882,6 +926,7 @@ class ApplianceStatus(object):
     @property
     def is_on(self):
         return self.status != AP_STATUS.OFF
+        
         
         
 ####  Below is for AC Unit
