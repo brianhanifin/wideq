@@ -544,7 +544,24 @@ class DeviceInfo(object):
     def image(self, path):
         """ Returns a path to a small file downloaded from LG's service representing the device """
         
-        url = self.model_small_icon_url
+        url = self.model_image_url
+        filename = os.path.join(path, url.split("=")[-1])
+        r = requests.get(url, timeout=0.5)
+
+        if r.status_code == 200:
+            with open(filename, 'wb') as f:
+                f.write(r.content)
+        
+        if f:
+            return filename
+        else:
+            return None
+            
+        @property
+    def small_image(self, path):
+        """ Returns a path to a small file downloaded from LG's service representing the device """
+        
+        url = self.model_small_image_url
         filename = os.path.join(path, url.split("=")[-1])
         r = requests.get(url, timeout=0.5)
 
@@ -830,7 +847,7 @@ class ApplianceDevice(object):
             )           
         
 class ApplianceStatus(object):
-    """Class to map Values to monitoring data for applicances"""
+    """Class to map Values to monitoring data for appliances"""
     def __init__(self, appliance, data):
         self.appliance = appliance
         self.data = data
@@ -885,6 +902,11 @@ class ApplianceStatus(object):
         
     def lookup_enum(self, key):
         return self.appliance.model.enum_name(key, self.data[key])
+        
+    @property
+    def course(self):
+    
+        return self.polled_data['Course']
     
     @property
     def time_remaining(self):

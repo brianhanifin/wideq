@@ -1,7 +1,7 @@
 import logging
 import voluptuous as vol
 import homeassistant.helpers.config_validation as cv
-from homeassistant.const import STATE_UNKNOWN
+from homeassistant.const import STATE_UNKNOWN, STATE_OFF
 from homeassistant.helpers.entity import Entity
 import time
 from homeassistant.components.sensor import PLATFORM_SCHEMA
@@ -47,7 +47,7 @@ class LGAppliance(Entity):
         if self._state:
             return self._state.status.name
         else:
-            return STATE_UNKNOWN
+            return STATE_OFF
             
     @property
     def time_remaining(self):
@@ -55,17 +55,28 @@ class LGAppliance(Entity):
         return self._state.time_remaining
     
     @property
+    def current_course(self):
+        return self._state.course
+        
+    @property
+    def initial_time(self):
+        return self._state.initial_time
+    
+    @property
     def device_state_attributes(self):
         """Return the state attributes."""
         if self._state is not None:
             return {
+                'Course': self.current_course,
+                'Initial time': self.initial_time,
                 'Time remaining': self.time_remaining,
+                
             }
             
     @property
-    def icon(self):
+    def entity_picture(self):
         
-        return self._device.get_icon('/home/slaframboise/.homeassistant/')
+        return self._device.image('/home/slaframboise/.homeassistant/')
         
     def update(self):
         """Poll for updated device status.
@@ -91,8 +102,8 @@ class LGAppliance(Entity):
                 return
                 
             LOGGER.info('No status available yet.')
-            time.sleep(2)
+            time.sleep(3)
 
         # We tried several times but got no result.
-        LOGGER.warn('Status update failed. Appliance(s) probably turned off.')
+        LOGGER.info('Status update failed. Appliance(s) probably turned off.')
         
