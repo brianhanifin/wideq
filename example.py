@@ -1,9 +1,3 @@
-import requests
-from urllib.parse import urljoin, urlencode, urlparse, parse_qs
-import uuid
-import base64
-import json
-import hashlib 
 import wideq
 import json
 import time
@@ -29,7 +23,7 @@ def ls(client):
     """List the user's devices."""
 
     for device in client.devices:
-        print('{0.id}: {0.name} ({0.model_id})'.format(device))
+        print('{0.id}: {0.name} ({0.type.name} {0.model_id})'.format(device))
 
 
 def mon(client, device_id):
@@ -45,29 +39,12 @@ def mon(client, device_id):
             while True:
                 time.sleep(1)
                 print('Polling...')
-                res = mon.poll()
-                        
-                if res:
-                    if isinstance(res, list):
-                        for key, item in enumerate(res):
-                            protocol = model.data['Monitoring']['protocol']
-                            values = model.data['Value']
-                            try:
-                                print('key: ', key)
-                                desc = protocol[key]['value']
-                                print('desc: ', desc)
-                                value = values[desc]
-                                
-                                if value['type'] == "Enum":
-                                    info = value['option'][str(item)]
-                                elif value['type'] == "Range":
-                                    info = item
-                                else:
-                                    info = 'data not supported: ' + str(item)
-                                
-                                print('{}:  {}'.format(desc, info))
-                            except KeyError as e:
-                                print('Invalid Key: {} - {} -- error: {}'.format(key, item, e.args[0]))
+                data = mon.poll()
+                if data:
+                    try:
+                        res = model.decode_monitor(data)
+                    except ValueError:
+                        print('status data: {!r}'.format(data))
                     else:
                         for key, value in res.items():
                             try:
@@ -81,8 +58,11 @@ def mon(client, device_id):
                             elif isinstance(desc, wideq.RangeValue):
                                 print('- {0}: {1} ({2.min}-{2.max})'.format(
                                     key, value, desc,
-
                                 ))
+                            elif isinstance(desc, wideq.ReferenceValue):
+                                print('Reference')
+                            elif isinstance(desc, wideq.BitValue):
+                                print('Bit')
 
         except KeyboardInterrupt:
             pass
@@ -93,7 +73,12 @@ def ac_mon(client, device_id):
     its status such as its temperature and operation mode.
     """
 
-    ac = wideq.ACDevice(client, client.get_device(device_id))
+    device = client.get_device(device_id)
+    if device.type != wideq.DeviceType.AC:
+        print('This is not an AC device.')
+        return
+
+    ac = wideq.ACDevice(client, device)
 
     try:
         ac.monitor_start()
@@ -105,7 +90,8 @@ def ac_mon(client, device_id):
                     '{1}; '
                     '{0.mode.name}; '
                     'cur {0.temp_cur_f}°F; '
-                    'cfg {0.temp_cfg_f}°F'
+                    'cfg {0.temp_cfg_f}°F; '
+                    'fan speed {0.fan_speed.name}'
                     .format(
                         state,
                         'on' if state.is_on else 'off'
@@ -116,59 +102,7 @@ def ac_mon(client, device_id):
         pass
     finally:
         ac.monitor_stop()
-        
-def appliance_mon(client, device_id):
-    """Monitor an Appliance and show high level current information
-    
-    """
-    
-    appliance = wideq.ApplianceDevice(client, client.get_device(device_id))
-    
-    try:
-        device_available = appliance.monitor_start()
-        if device_available:
-            while True:
-                time.sleep(2)
-                state = appliance.poll()
 
-                if state:
-                    print(state.get_polled_data())
-                    print(state.is_on)
-                    print(state.status)
-        else:
-            print('Device unreachable, is it powered on?')
-
-    except KeyboardInterrupt:
-        pass
-    finally:
-        appliance.monitor_stop()
-        
-def stop_appliance(client, device_id):
-    appliance = wideq.ApplianceDevice(client, client.get_device(device_id))
-    
-    device_available = appliance.monitor_start()
-    if device_available:
-        time.sleep(5)
-        appliance.stop()
-    appliance.monitor_stop()
-    
-def start_appliance(client, device_id):
-    appliance = wideq.ApplianceDevice(client, client.get_device(device_id))
-    
-    device_available = appliance.monitor_start()
-    if device_available:
-        time.sleep(5)
-        appliance.start()
-    appliance.monitor_stop()
-
-def turn_off_appliance(client, device_id):
-    appliance = wideq.ApplianceDevice(client, client.get_device(device_id))
-    
-    device_available = appliance.monitor_start()
-    if device_available:
-        time.sleep(5)
-        appliance.turn_off()
-    appliance.monitor_stop()
 
 def set_temp(client, device_id, temp):
     """Set the configured temperature for an AC device."""
@@ -184,36 +118,23 @@ def turn(client, device_id, on_off):
     ac.set_on(on_off == 'on')
 
 
-def getDeviceInfo(client, device_id):
-    device = client.get_device(device_id)
-    deviceName = device.name
-    
-    with open(deviceName + '_info.json', 'w') as outfile:
-        json.dump(device.data, outfile)
-    
-    
-def getModelInfo(client, device_id):
-    device = client.get_device(device_id)
-    model = client.model_info(device)
-    modelName = model.data['Info']['modelName']
-    
-    with open(modelName + '_info.json', 'w') as outfile:
-        json.dump(model.data, outfile)
-    
-    
-    
+def ac_config(client, device_id):
+    ac = wideq.ACDevice(client, client.get_device(device_id))
+    print(ac.get_filter_state())
+    print(ac.get_mfilter_state())
+    print(ac.get_energy_target())
+    print(ac.get_volume())
+    print(ac.get_light())
+    print(ac.get_zones())
+
+
 EXAMPLE_COMMANDS = {
     'ls': ls,
     'mon': mon,
     'ac-mon': ac_mon,
     'set-temp': set_temp,
     'turn': turn,
-    'dev': getDeviceInfo,
-    'model': getModelInfo,
-    'app-mon': appliance_mon,
-    'stop-app': stop_appliance,
-    'start-app': start_appliance,
-    'off-app': turn_off_appliance,
+    'ac-config': ac_config,
 }
 
 
@@ -223,8 +144,6 @@ def example_command(client, args):
     else:
         func = EXAMPLE_COMMANDS[args[0]]
         func(client, *args[1:])
-        
-
 
 
 def example(args):

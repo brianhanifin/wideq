@@ -12,6 +12,7 @@ LOGGER = logging.getLogger(__name__)
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
     vol.Required('token'): cv.string,
+    vol.Optional('img_path'): cv.string,
 })
 MAX_RETRIES = 5
 
@@ -20,13 +21,16 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
 
     refresh_token = config.get('token')
     client = wideq.Client.from_token(refresh_token)
+    
+    img_path = config.get('img_path') if config.get('img_path') else None
 
-    add_devices(LGAppliance(client, device) for device in client.devices)
+    add_devices(LGAppliance(client, device, img_path) for device in client.devices)
 
 class LGAppliance(Entity):
-    def __init__(self, client, device):
+    def __init__(self, client, device, img_path):
         self._client = client
         self._device = device
+        self._img_path = img_path
 
         import wideq
         self._appliance = wideq.ApplianceDevice(client, device)
@@ -76,7 +80,7 @@ class LGAppliance(Entity):
     @property
     def entity_picture(self):
         
-        return self._device.image('/home/slaframboise/.homeassistant/')
+        return self._device.image(self._img_path) if _img_path else None
         
     def update(self):
         """Poll for updated device status.

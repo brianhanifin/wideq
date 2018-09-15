@@ -8,10 +8,6 @@ import hmac
 import datetime
 from collections import namedtuple
 import enum
-import binascii
-import sys
-import os
-from bitstring import BitArray
 
 
 GATEWAY_URL = 'https://kic.lgthinq.com:46030/api/common/gatewayUriList'
@@ -34,7 +30,6 @@ def gen_uuid():
 def oauth2_signature(message, secret):
     """Get the base64-encoded SHA-1 HMAC digest of a string, as used in
     OAauth2 request signatures.
-
     Both the `secret` and `message` are given as text strings. We use
     their UTF-8 equivalents.
     """
@@ -43,6 +38,24 @@ def oauth2_signature(message, secret):
     hashed = hmac.new(secret_bytes, message.encode('utf8'), hashlib.sha1)
     digest = hashed.digest()
     return base64.b64encode(digest)
+
+
+def get_list(obj, key):
+    """Look up a list using a key from an object.
+    If `obj[key]` is a list, return it unchanged. If is something else,
+    return a single-element list containing it. If the key does not
+    exist, return an empty list.
+    """
+
+    try:
+        val = obj[key]
+    except KeyError:
+        return []
+
+    if isinstance(val, list):
+        return val
+    else:
+        return [val]
 
 
 class APIError(Exception):
@@ -67,13 +80,21 @@ class TokenError(APIError):
         pass
 
 
+class MonitorError(APIError):
+    """Monitoring a device failed, possibly because the monitoring
+    session failed and needs to be restarted.
+    """
+
+    def __init__(self, device_id, code):
+        self.device_id = device_id
+        self.code = code
+
+
 def lgedm_post(url, data=None, access_token=None, session_id=None):
     """Make an HTTP request in the format used by the API servers.
-
     In this format, the request POST data sent as JSON under a special
     key; authentication sent in headers. Return the JSON data extracted
     from the response.
-
     The `access_token` and `session_id` are required for most normal,
     authenticated requests. They are not required, for example, to load
     the gateway server data or to start a session.
@@ -88,21 +109,15 @@ def lgedm_post(url, data=None, access_token=None, session_id=None):
         headers['x-thinq-token'] = access_token
     if session_id:
         headers['x-thinq-jsessionId'] = session_id
-    # print(url)
-    # print(data)
+
     res = requests.post(url, json={DATA_ROOT: data}, headers=headers)
     out = res.json()[DATA_ROOT]
 
     # Check for API errors.
     if 'returnCd' in out:
         code = out['returnCd']
-        if code != '0000' and code !='0106':
+        if code != '0000':
             message = out['returnMsg']
-            # if code == "0106":
-                # # TODO: this will need to be handled better
-                # print('Unable to reach Device.  Device is off?')
-                # sys.exit("The device is off")
-                
             if code == "0102":
                 raise NotLoggedInError()
             else:
@@ -166,7 +181,6 @@ def login(api_root, access_token):
 
 def refresh_auth(oauth_root, refresh_token):
     """Get a new access_token using a refresh_token.
-
     May raise a `TokenError`.
     """
 
@@ -236,12 +250,12 @@ class Auth(object):
 
     def start_session(self):
         """Start an API session for the logged-in user. Return the
-        Session object and the user's devices.
+        Session object and a list of the user's devices.
         """
 
         session_info = login(self.gateway.api_root, self.access_token)
         session_id = session_info['jsessionId']
-        return Session(self, session_id), session_info['item']
+        return Session(self, session_id), get_list(session_info, 'item')
 
     def refresh(self):
         """Refresh the authentication, returning a new Auth object.
@@ -259,7 +273,6 @@ class Session(object):
 
     def post(self, path, data=None):
         """Make a POST request to the API server.
-
         This is like `lgedm_post`, but it pulls the context for the
         request from an active Session.
         """
@@ -269,17 +282,15 @@ class Session(object):
 
     def get_devices(self):
         """Get a list of devices associated with the user's account.
-
         Return a list of dicts with information about the devices.
         """
 
-        return self.post('device/deviceList')['item']
+        return get_list(self.post('device/deviceList'), 'item')
 
     def monitor_start(self, device_id):
         """Begin monitoring a device's status.
-
         Return a "work ID" that can be used to retrieve the result of
-        monitoring.  Or a 0 if device is reachable.
+        monitoring.
         """
 
         res = self.post('rti/rtiMon', {
@@ -288,38 +299,32 @@ class Session(object):
             'deviceId': device_id,
             'workId': gen_uuid(),
         })
-        
-        if 'workId' in res:
-            return res['workId']
-        else:
-            return 0
-        
+        return res['workId']
 
     def monitor_poll(self, device_id, work_id):
         """Get the result of a monitoring task.
-
-        `work_ids` is a mapping from device IDs to work IDs. Return the
-        device status or None if the monitoring is not yet ready.
+        `work_id` is a string ID retrieved from `monitor_start`. Return
+        a status result, which is a bytestring, or None if the
+        monitoring is not yet ready.
+        May raise a `MonitorError`, in which case the right course of
+        action is probably to restart the monitoring task.
         """
-        if work_id == 0:
-            return None 
-            
+
         work_list = [{'deviceId': device_id, 'workId': work_id}]
         res = self.post('rti/rtiResult', {'workList': work_list})['workList']
 
+        # Check for errors.
+        code = res.get('returnCode')  # returnCode can be missing.
+        if code != '0000':
+            raise MonitorError(device_id, code)
+
+        # The return data may or may not be present, depending on the
+        # monitoring task status.
         if 'returnData' in res:
-            try:
-                # Weirdly, the main response data is base64-encoded JSON. (AC Unit)
-                resData = json.loads(
-                    base64.b64decode(res['returnData']).decode('utf8')
-                    )
-            except:
-                # Looks like we're getting a base64 encoded bytearray for the washer/dryer?
-                resData = list(
-                    binascii.a2b_base64(res['returnData'])
-                    )
-            return resData
-            
+            # The main response payload is base64-encoded binary data in
+            # the `returnData` field. This sometimes contains JSON data
+            # and sometimes other binary data.
+            return base64.b64decode(res['returnData'])
         else:
             return None
 
@@ -333,24 +338,43 @@ class Session(object):
             'workId': work_id,
         })
 
-    def set_device_controls(self, device_id, values, cmdOpt = 'Set', data = ''):
+    def set_device_controls(self, device_id, values):
         """Control a device's settings.
-
         `values` is a key/value map containing the settings to update.
         """
 
-        self.post('rti/rtiControl', {
+        return self.post('rti/rtiControl', {
             'cmd': 'Control',
-            'cmdOpt': cmdOpt,
+            'cmdOpt': 'Set',
             'value': values,
             'deviceId': device_id,
             'workId': gen_uuid(),
-            'data': data,
+            'data': '',
         })
+
+    def get_device_config(self, device_id, key, category='Config'):
+        """Get a device configuration option.
+        The `category` string should probably either be "Config" or
+        "Control"; the right choice appears to depend on the key.
+        """
+
+        res = self.post('rti/rtiControl', {
+            'cmd': category,
+            'cmdOpt': 'Get',
+            'value': key,
+            'deviceId': device_id,
+            'workId': gen_uuid(),
+            'data': '',
+        })
+        return res['returnData']
 
 
 class Monitor(object):
-    """A monitoring task for a device."""
+    """A monitoring task for a device.
+    This task is robust to some API-level failures. If the monitoring
+    task expires, it attempts to start a new one automatically. This
+    makes one `Monitor` object suitable for long-term monitoring.
+    """
 
     def __init__(self, session, device_id):
         self.session = session
@@ -358,13 +382,36 @@ class Monitor(object):
 
     def start(self):
         self.work_id = self.session.monitor_start(self.device_id)
-        return self.work_id
 
     def stop(self):
         self.session.monitor_stop(self.device_id, self.work_id)
 
     def poll(self):
-        return self.session.monitor_poll(self.device_id, self.work_id)
+        """Get the current status data (a bytestring) or None if the
+        device is not yet ready.
+        """
+
+        try:
+            return self.session.monitor_poll(self.device_id, self.work_id)
+        except MonitorError:
+            # Try to restart the task.
+            self.stop()
+            self.start()
+            return None
+
+    @staticmethod
+    def decode_json(data):
+        """Decode a bytestring that encodes JSON status data."""
+
+        return json.loads(data.decode('utf8'))
+
+    def poll_json(self):
+        """For devices where status is reported via JSON data, get the
+        decoded status result (or None if status is not available).
+        """
+
+        data = self.poll()
+        return self.decode_json(data) if data else None
 
     def __enter__(self):
         self.start()
@@ -422,7 +469,6 @@ class Client(object):
 
     def get_device(self, device_id):
         """Look up a DeviceInfo object by device ID.
-
         Return None if the device does not exist.
         """
 
@@ -490,7 +536,6 @@ class Client(object):
     @classmethod
     def from_token(cls, refresh_token):
         """Construct a client using just a refresh token.
-
         This allows simpler state storage (e.g., for human-written
         configuration) but it is a little less efficient because we need
         to reload the gateway servers and restart the session.
@@ -511,9 +556,38 @@ class Client(object):
         return ModelInfo(self._model_info[url])
 
 
+class DeviceType(enum.Enum):
+    """The category of device."""
+
+    REFRIGERATOR = 101
+    KIMCHI_REFRIGERATOR = 102
+    WATER_PURIFIER = 103
+    WASHER = 201
+    DRYER = 202
+    STYLER = 203
+    DISHWASHER = 204
+    OVEN = 301
+    MICROWAVE = 302
+    COOKTOP = 303
+    HOOD = 304
+    AC = 401  # Includes heat pumps, etc., possibly all HVAC devices.
+    AIR_PURIFIER = 402
+    DEHUMIDIFIER = 403
+    ROBOT_KING = 501  # Robotic vacuum cleaner?
+    ARCH = 1001
+    MISSG = 3001
+    SENSOR = 3002
+    SOLAR_SENSOR = 3102
+    IOT_LIGHTING = 3003
+    IOT_MOTION_SENSOR = 3004
+    IOT_SMART_PLUG = 3005
+    IOT_DUST_SENSOR = 3006
+    EMS_AIR_STATION = 4001
+    AIR_SENSOR = 4003
+
+
 class DeviceInfo(object):
     """Details about a user's device.
-
     This is populated from a JSON dictionary provided by the API.
     """
 
@@ -531,52 +605,16 @@ class DeviceInfo(object):
     @property
     def model_info_url(self):
         return self.data['modelJsonUrl']
-        
-    @property
-    def model_image_url(self):
-        return self.data['imageUrl']
-    
-    @property
-    def model_small_image_url(self):
-        return self.data['smallImageUrl']
-    
-    @property
-    def image(self, path):
-        """ Returns a path to a small file downloaded from LG's service representing the device """
-        
-        url = self.model_image_url
-        filename = os.path.join(path, url.split("=")[-1])
-        r = requests.get(url, timeout=0.5)
 
-        if r.status_code == 200:
-            with open(filename, 'wb') as f:
-                f.write(r.content)
-        
-        if f:
-            return filename
-        else:
-            return None
-            
-        @property
-    def small_image(self, path):
-        """ Returns a path to a small file downloaded from LG's service representing the device """
-        
-        url = self.model_small_image_url
-        filename = os.path.join(path, url.split("=")[-1])
-        r = requests.get(url, timeout=0.5)
-
-        if r.status_code == 200:
-            with open(filename, 'wb') as f:
-                f.write(r.content)
-        
-        if f:
-            return filename
-        else:
-            return None
-    
     @property
     def name(self):
         return self.data['alias']
+
+    @property
+    def type(self):
+        """The kind of device, as a `DeviceType` value."""
+
+        return DeviceType(self.data['deviceType'])
 
     def load_model_info(self):
         """Load JSON data describing the model's capabilities.
@@ -589,36 +627,25 @@ RangeValue = namedtuple('RangeValue', ['min', 'max', 'step'])
 BitValue = namedtuple('BitValue', ['options'])
 ReferenceValue = namedtuple('ReferenceValue', ['reference'])
 
+
 class ModelInfo(object):
     """A description of a device model's capabilities.
     """
 
     def __init__(self, data):
         self.data = data
-    
-    def value_type(self, name):
-        if name in self.data['Value']:
-            return self.data['Value'][name]['type']
-        else:
-            return None
 
     def value(self, name):
         """Look up information about a value.
-
         Return either an `EnumValue` or a `RangeValue`.
         """
         d = self.data['Value'][name]
         if d['type'] in ('Enum', 'enum'):
             return EnumValue(d['option'])
         elif d['type'] == 'Range':
-            if d['option']['step']:
-                return RangeValue(
-                    d['option']['min'], d['option']['max'], d['option']['step']
-                )
-            else:
-                return RangeValue(
-                    d['option']['min'], d['option']['max'], '1'
-                )
+            return RangeValue(
+                d['option']['min'], d['option']['max'], d['option']['step']
+            )
         elif d['type'] == 'Bit':
             bit_values = {}
             for bit in d['option']:
@@ -656,302 +683,95 @@ class ModelInfo(object):
     def enum_name(self, key, value):
         """Look up the friendly enum name for an encoded value.
         """
-        if not self.value_type(key):
-            return str(value)
-        
-        options = self.value(key).options
-        return options[str(value)]
-        
-    def range_name(self, key):
-        """Look up the value of a RangeValue.  Not very useful other than for comprehension  
-        """
-        
-        return key
-        
-    def bit_name(self, key, bit_index, value):
-        """Look up the friendly name for an encoded bit value
-        """
-        if not self.value_type(key):
-            return str(value)
-            
-        options = self.value(key).options
-        
-        if not self.value_type(options[bit_index]['value']):
-            return str(value) 
-            
-        enum_options = self.value(options[bit_index]['value']).options
-        return enum_options[value]
-        
-    def reference_name(self, key, value):
-        """Look up the friendly name for an encoded reference value
-        """
-        value = str(value)
-        if not self.value_type(key):
-            return value
-            
-        reference = self.value(key).reference
 
-        if value in reference:
-            comment = reference[value]['_comment']
-            return comment if comment else reference[value]['label']
+        options = self.value(key).options
+        return options[value]
+
+    @property
+    def binary_monitor_data(self):
+        """Check that type of monitoring is BINARY(BYTE).
+        """
+
+        return self.data['Monitoring']['type'] == 'BINARY(BYTE)'
+
+    def decode_monitor_binary(self, data):
+        """Decode binary encoded status data.
+        """
+
+        decoded = {}
+        for item in self.data['Monitoring']['protocol']:
+            key = item['value']
+            value = 0
+            for v in data[item['startByte']:item['startByte'] + item['length']]:
+                value = (value << 8) + v
+            decoded[key] = str(value)
+        return decoded
+
+    def decode_monitor_json(self, data):
+        """Decode a bytestring that encodes JSON status data."""
+
+        return json.loads(data.decode('utf8'))
+
+    def decode_monitor(self, data):
+        """Decode  status data."""
+
+        if self.binary_monitor_data:
+            return self.decode_monitor_binary(data)
         else:
-            return '-'
-        
-        
-        
+            return self.decode_monitor_json(data)
 
-class AP_STATUS(enum.Enum):
 
-    OFF = "@WM_STATE_POWER_OFF_W"
-    STANDBY = "@WM_STATE_INITIAL_W"
-    PAUSE = "@WM_STATE_PAUSE_W"
-    DETECTING = "@WM_STATE_DETECTING_W"
-    SOAK = "@WM_STATE_SOAK_W"
-    RUNNING = "@WM_STATE_RUNNING_W"
-    RINSING = "@WM_STATE_RINSING_W"
-    SPINNING = "@WM_STATE_SPINNING_W"
-    FINISHED = "@WM_STATE_COMPLETE_W"
-    RESERVE = "@WM_STATE_RESERVE_W"
-    FIRMWARE = "@WM_STATE_FIRMWARE_W"
-    DIAGNOSIS = "@WM_STATE_SMART_DIAGNOSIS_W"
-    END = "@WM_STATE_END_W"
-    ERROR = "@WM_STATE_ERROR_W"
-    DRYING = "@WM_STATE_DRYING_W"
-    COOLING = "@WM_STATE_COOLING_W"
-    WRINKLECARE = "@WM_STATE_WRINKLECARE_W"
-    
-class AP_STRINGS(enum.Enum):
-    
-    OFF = '@CP_OFF_EN_W'
-    ON = '@CP_ON_EN_W'
-                
-class ApplianceDevice(object):
-    """Higher level operations for an appliance (Washer/Dryer/???)"""
+class Device(object):
+    """A higher-level interface to a specific device.
+    Unlike `DeviceInfo`, which just stores data *about* a device,
+    `Device` objects refer to their client and can perform operations
+    regarding the device.
+    """
+
     def __init__(self, client, device):
+        """Create a wrapper for a `DeviceInfo` object associated with a
+        `Client`.
+        """
+
         self.client = client
         self.device = device
         self.model = client.model_info(device)
-        self.status = None
 
-    def get_values_list(self):
-        """Returns a list of all possible values"""
-        vals = self.model.data['Value']
-        valKeys = list(vals.keys())
-        
-        return valKeys
-    
-    def get_value_options(self, name):
-        """Get the possible options for a value, only Enum and Range implemented"""
-        vals = self.model.data['Value']
-        if name in vals:
-            if vals[name]['type'] == 'Enum':
-                return EnumValue(
-                    vals[name]['option']
-                )
-            elif vals[name]['type'] == 'Range':
-                return RangeValue(
-                    vals[name]['option']['min'], vals[name]['option']['max'], '1'
-                )
-            elif vals[name]['type'] == 'Bit':
-                bit_values = {}
-                for item in vals[name]['option']:
-                    bit_values[item['startbit']] = {
-                        'value' : item['value'],
-                        'length' : item['length'],
-                    }
-                return bit_values
-            else:
-                return None
-        else:
-            return 1
-        
-    def monitoring_list(self):
-        """Returns a list of all monitored values we get from the polling"""
-        
-        protocol = self.model.data['Monitoring']['protocol']
-        mon_list = []
-        
-        for item in protocol:
-            mon_list.append(item['value'])
-            
-        return mon_list
-        
-    def protocol(self):
-        """ Returns a dict of the monitoring protocol, Keys are the start byte of the polling """
-        
-        raw_protocol = self.model.data['Monitoring']['protocol']
-        protocol = {}
-        
-        for item in raw_protocol:
-            protocol[item['startByte']] = {
-                'value' : item['value'], 
-                'length' : item['length'],
-                }
-        
-        return protocol
-        
-
-    def monitor_start(self):
-        """Start monitoring the device's status."""
-
-        self.mon = Monitor(self.client.session, self.device.id)
-        return self.mon.start()
-
-    def monitor_stop(self):
-        """Stop monitoring the device's status."""
-
-        self.mon.stop()
-    
-    def poll(self):
-        res = self.mon.poll()
-        
-        if res:
-            self.status = ApplianceStatus(self, res)
-            return self.status
-        else:
-            return None
-            
-    def stop(self):
-        """Stop current operation (to pause cycle)"""
-        self.poll()
-        
-        if self.status.is_on:
-            self.client.session.set_device_controls(
-                self.device.id,
-                'Stop',
-                'Operation',
-            )
-            
-    def start(self):
-        """ restart paused appliance """
-        self.poll()
-        
-        if self.status.is_on:
-            self.client.session.set_device_controls(
-                self.device.id,
-                'Start',
-                'Operation',
-            )
-
-            
-            
-    def turn_off(self):
-        """Turn off the appliance, will be unreachable after this."""
-        self.poll()        
-        
-        if self.status.is_on:
-            self.client.session.set_device_controls(
-                self.device.id,
-                'Off',
-                'Power',
-            )           
-        
-class ApplianceStatus(object):
-    """Class to map Values to monitoring data for appliances"""
-    def __init__(self, appliance, data):
-        self.appliance = appliance
-        self.data = data
-
-        self.polled_data = {}
-        self.protocol = self.appliance.protocol()
-        
-        for key, item in enumerate(self.data):
-
-            if key in self.protocol:
-                polled_item = self.protocol[key]['value']
-                value_type = self.appliance.model.value_type(polled_item)
-                
-                if value_type == 'Enum':
-                    self.polled_data[polled_item] = self.appliance.model.enum_name(polled_item, item)
-                elif value_type == 'Range':
-                    self.polled_data[polled_item] = self.appliance.model.range_name(item)
-                elif value_type == 'Bit':
-                    bit_array = BitArray(uint=item, length=8)
-                    bit_array.reverse()
-                    bit_options = self.appliance.get_value_options(polled_item)
-                    self.polled_data[polled_item] = {}
-                    for k, v in enumerate(bit_array.bin):
-                        if k in bit_options:
-                            self.polled_data[polled_item][bit_options[k]['value']] = self.appliance.model.bit_name(polled_item, k, v)
-                elif value_type == 'Reference':
-                    self.polled_data[polled_item] = self.appliance.model.reference_name(polled_item, item)
-                else:
-                    self.polled_data[polled_item] = "Undecoded value - " + str(item)
-            else:
-                self.polled_data['Item ' + str(key)] = "Value not in protocol - " + str(item)
-
-            
-    def get_polled_data(self):
-        """ Returns all data in a dictionary """
-        
-        return self.polled_data
-        
-        
-    
-    def convert_to_time(self, hours, minutes):
-        """ We receive integers for hours and integers for minutes,
-            this method will convert to a time string.
+    def _set_control(self, key, value):
+        """Set a device's control for `key` to `value`.
         """
-        if minutes < 10:
-            minutes_str = '0' + str(minutes)
-        else: 
-            minutes_str = str(minutes)
-            
-        timer = str(hours) + ":" + minutes_str
-        return timer
-        
-    def lookup_enum(self, key):
-        return self.appliance.model.enum_name(key, self.data[key])
-        
-    @property
-    def course(self):
-    
-        return self.polled_data['Course']
-    
-    @property
-    def time_remaining(self):
-        """ Returns time remaining for this cycle """
-        
-        hours = self.polled_data['Remain_Time_H']
-        minutes = self.polled_data['Remain_Time_M']
-        
-        
-        return self.convert_to_time(hours, minutes)
-    
-    @property
-    def initial_time(self):
-        """ Returns the initially approximated time for the full cycle """
-    
-        hours = self.polled_data['Initial_Time_H']
-        minutes = self.polled_data['Initial_Time_M']
-        
-        
-        return self.convert_to_time(hours, minutes)
-    
-    @property
-    def reserve_time(self):
-        """ Returns the Reserve time (I believe this is when the 
-            appliance is set to start at a later time) 
+
+        self.client.session.set_device_controls(
+            self.device.id,
+            {key: value},
+        )
+
+    def _get_config(self, key):
+        """Look up a device's configuration for a given value.
+        The response is parsed as base64-encoded JSON.
         """
-        
-        hours = self.polled_data['Reserve_Time_H']
-        minutes = self.polled_data['Reserve_Time_M']
-        
-        return self.convert_to_time(hours, minutes)    
-    
-    @property    
-    def status(self):
-        """ Returns the current cycle/status """
-    
-        return AP_STATUS(self.polled_data['State'])
-    
-    @property
-    def is_on(self):
-        return self.status != AP_STATUS.OFF
-        
-        
-        
-####  Below is for AC Unit
+
+        data = self.client.session.get_device_config(
+            self.device.id,
+            key,
+        )
+        return json.loads(base64.b64decode(data).decode('utf8'))
+
+    def _get_control(self, key):
+        """Look up a device's control value.
+        """
+
+        data = self.client.session.get_device_config(
+            self.device.id,
+            key,
+            'Control',
+        )
+
+        # The response comes in a funky key/value format: "(key:value)".
+        _, value = data[1:-1].split(':')
+        return value
+
+
 class ACMode(enum.Enum):
     """The operation mode for an AC/HVAC device."""
 
@@ -966,6 +786,20 @@ class ACMode(enum.Enum):
     ENERGY_SAVING = "@AC_MAIN_OPERATION_MODE_ENERGY_SAVING_W"
 
 
+class ACFanSpeed(enum.Enum):
+    """The fan speed for an AC/HVAC device."""
+
+    SLOW = '@AC_MAIN_WIND_STRENGTH_SLOW_W'
+    SLOW_LOW = '@AC_MAIN_WIND_STRENGTH_SLOW_LOW_W'
+    LOW = '@AC_MAIN_WIND_STRENGTH_LOW_W'
+    LOW_MID = '@AC_MAIN_WIND_STRENGTH_LOW_MID_W'
+    MID = '@AC_MAIN_WIND_STRENGTH_MID_W'
+    MID_HIGH = '@AC_MAIN_WIND_STRENGTH_MID_HIGH_W'
+    HIGH = '@AC_MAIN_WIND_STRENGTH_HIGH_W'
+    POWER = '@AC_MAIN_WIND_STRENGTH_POWER_W'
+    AUTO = '@AC_MAIN_WIND_STRENGTH_AUTO_W'
+
+
 class ACOp(enum.Enum):
     """Whether a device is on or off."""
 
@@ -975,25 +809,15 @@ class ACOp(enum.Enum):
     ALL_ON = "@AC_MAIN_OPERATION_ALL_ON_W"
 
 
-class ACDevice(object):
+class ACDevice(Device):
     """Higher-level operations on an AC/HVAC device, such as a heat
     pump.
     """
-
-    def __init__(self, client, device):
-        """Create a wrapper for a `DeviceInfo` object associated with a
-        `Client`.
-        """
-
-        self.client = client
-        self.device = device
-        self.model = client.model_info(device)
 
     @property
     def f2c(self):
         """Get a dictionary mapping Fahrenheit to Celsius temperatures for
         this device.
-
         Unbelievably, SmartThinQ devices have their own lookup tables
         for mapping the two temperature scales. You can get *close* by
         using a real conversion between the two temperature scales, but
@@ -1006,18 +830,20 @@ class ACDevice(object):
     @property
     def c2f(self):
         """Get an inverse mapping from Celsius to Fahrenheit.
+        Just as unbelievably, this is not exactly the inverse of the
+        `f2c` map. There are a few values in this reverse mapping that
+        are not in the other.
         """
 
-        return {v: k for k, v in self.f2c.items()}
-
-    def _set_control(self, key, value):
-        """Set a device's control for `key` to `value`.
-        """
-
-        self.client.session.set_device_controls(
-            self.device.id,
-            {key: value},
-        )
+        mapping = self.model.value('TempCelToFah').options
+        out = {}
+        for c, f in mapping.items():
+            try:
+                c_num = int(c)
+            except ValueError:
+                c_num = float(c)
+            out[c_num] = f
+        return out
 
     def set_celsius(self, c):
         """Set the device's target temperature in Celsius degrees.
@@ -1030,6 +856,42 @@ class ACDevice(object):
         """
 
         self.set_celsius(self.f2c[f])
+
+    def set_zones(self, zones):
+        """Turn off or on the device's zones.
+        The `zones` parameter is a list of dicts with these keys:
+        - "No": The zone index. A string containing a number,
+          starting from 1.
+        - "Cfg": Whether the zone is enabled. A string, either "1" or
+          "0".
+        - "State": Whether the zone is open. Also "1" or "0".
+        """
+
+        # Ensure at least one zone is enabled: we can't turn all zones
+        # off simultaneously.
+        on_count = sum(int(zone['State']) for zone in zones)
+        if on_count > 0:
+            zone_cmd = '/'.join(
+                '{}_{}'.format(zone['No'], zone['State'])
+                for zone in zones if zone['Cfg'] == '1'
+            )
+            self._set_control('DuctZone', zone_cmd)
+
+    def get_zones(self):
+        """Get the status of the zones, including whether a zone is
+        configured.
+        The result is a list of dicts with the same format as described in
+        `set_zones`.
+        """
+
+        return self._get_config('DuctZone')
+
+    def set_fan_speed(self, speed):
+        """Set the fan speed to a value from the `ACFanSpeed` enum.
+        """
+
+        speed_value = self.model.enum_value('WindStrength', speed.value)
+        self._set_control('WindStrength', speed_value)
 
     def set_mode(self, mode):
         """Set the device's operating mode to an `OpMode` value.
@@ -1046,6 +908,34 @@ class ACDevice(object):
         op_value = self.model.enum_value('Operation', op.value)
         self._set_control('Operation', op_value)
 
+    def get_filter_state(self):
+        """Get information about the filter."""
+
+        return self._get_config('Filter')
+
+    def get_mfilter_state(self):
+        """Get information about the "MFilter" (not sure what this is).
+        """
+
+        return self._get_config('MFilter')
+
+    def get_energy_target(self):
+        """Get the configured energy target data."""
+
+        return self._get_config('EnergyDesiredValue')
+
+    def get_light(self):
+        """Get a Boolean indicating whether the display light is on."""
+
+        value = self._get_control('DisplayControl')
+        return value == '0'  # Seems backwards, but isn't.
+
+    def get_volume(self):
+        """Get the speaker volume level."""
+
+        value = self._get_control('SpkVolume')
+        return int(value)
+
     def monitor_start(self):
         """Start monitoring the device's status."""
 
@@ -1059,13 +949,12 @@ class ACDevice(object):
 
     def poll(self):
         """Poll the device's current state.
-
         Monitoring must be started first with `monitor_start`. Return
         either an `ACStatus` object or `None` if the status is not yet
         available.
         """
 
-        res = self.mon.poll()
+        res = self.mon.poll_json()
         if res:
             return ACStatus(self, res)
         else:
@@ -1083,7 +972,6 @@ class ACStatus(object):
     @staticmethod
     def _str_to_num(s):
         """Convert a string to either an `int` or a `float`.
-
         Troublingly, the API likes values like "18", without a trailing
         ".0", for whole numbers. So we use `int`s for integers and
         `float`s for non-whole numbers.
@@ -1117,6 +1005,10 @@ class ACStatus(object):
     @property
     def mode(self):
         return ACMode(self.lookup_enum('OpMode'))
+
+    @property
+    def fan_speed(self):
+        return ACFanSpeed(self.lookup_enum('WindStrength'))
 
     @property
     def is_on(self):
